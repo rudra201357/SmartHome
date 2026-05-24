@@ -3,6 +3,7 @@ import {
   ActivityIndicator,
   BackHandler,
   KeyboardAvoidingView,
+  Modal,
   Platform,
   Pressable,
   ScrollView,
@@ -13,7 +14,7 @@ import {
 } from 'react-native';
 import { aboutContent } from '../content/about';
 import { colors, radius, shadow, spacing } from '../styles/theme';
-import { getRelayControls } from '../utils/nodes';
+import { getNodeSchedules, getRelayControls, getScheduleServiceNodes } from '../utils/nodes';
 
 export default function DashboardScreen({
   nodes,
@@ -23,9 +24,13 @@ export default function DashboardScreen({
   updatingKey,
   relayNames,
   onRenameRelay,
+  onCreateSchedule,
+  onDeleteSchedule,
 }) {
   const [activeTab, setActiveTab] = useState('home');
   const relays = useMemo(() => getRelayControls(nodes), [nodes]);
+  const schedules = useMemo(() => getNodeSchedules(nodes), [nodes]);
+  const scheduleServiceNodes = useMemo(() => getScheduleServiceNodes(nodes), [nodes]);
 
   useEffect(() => {
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
@@ -46,32 +51,49 @@ export default function DashboardScreen({
       keyboardVerticalOffset={Platform.OS === 'ios' ? 12 : 0}
       style={styles.keyboardView}
     >
-      <ScrollView
-        contentContainerStyle={styles.content}
-        keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="on-drag"
-      >
       <View style={styles.header}>
         <Text style={styles.title}>My SmartHome</Text>
         <Pressable
           onPress={() => setActiveTab(activeTab === 'settings' ? 'home' : 'settings')}
           style={({ pressed }) => [styles.settingsButton, pressed ? styles.pressed : null]}
         >
-          <Text style={styles.settingsIcon}>{activeTab === 'settings' ? 'Home' : '⚙'}</Text>
+          <Text style={styles.settingsIcon}>{activeTab === 'settings' ? 'Home' : 'Settings'}</Text>
         </Pressable>
       </View>
 
-      {activeTab === 'home' ? (
-        <RelayGrid relays={relays} loading={loading} updatingKey={updatingKey} names={relayNames} onUpdate={onUpdate} />
-      ) : (
-        <SettingsList relays={relays} names={relayNames} onRenameRelay={onRenameRelay} onLogout={onLogout} />
-      )}
+      <ScrollView
+        contentContainerStyle={styles.content}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="on-drag"
+      >
+        {activeTab === 'home' ? (
+          <RelayGrid
+            relays={relays}
+            loading={loading}
+            updatingKey={updatingKey}
+            names={relayNames}
+            onUpdate={onUpdate}
+            onCreateSchedule={onCreateSchedule}
+          />
+        ) : (
+          <SettingsList
+            relays={relays}
+            names={relayNames}
+            schedules={schedules}
+            scheduleServiceNodes={scheduleServiceNodes}
+            onRenameRelay={onRenameRelay}
+            onDeleteSchedule={onDeleteSchedule}
+            onLogout={onLogout}
+          />
+        )}
       </ScrollView>
     </KeyboardAvoidingView>
   );
 }
 
-function RelayGrid({ relays, loading, updatingKey, names, onUpdate }) {
+function RelayGrid({ relays, loading, updatingKey, names, onUpdate, onCreateSchedule }) {
+  const [scheduleRelay, setScheduleRelay] = useState(null);
+
   if (!relays.length) {
     return (
       <View style={styles.empty}>
@@ -85,14 +107,19 @@ function RelayGrid({ relays, loading, updatingKey, names, onUpdate }) {
     <View style={styles.grid}>
       {relays.map((relay) => {
         const isUpdating = updatingKey === relay.key;
-        // Saved names override the RainMaker device name on both Home and Settings.
         const label = names[relay.key]?.trim() || relay.defaultName;
+        const relayWithLabel = {
+          ...relay,
+          displayName: label,
+        };
 
         return (
           <Pressable
             key={relay.key}
             disabled={loading || isUpdating || !relay.online}
             onPress={() => onUpdate(relay.nodeId, relay.deviceName, relay.paramName, !relay.value, relay.key)}
+            onLongPress={() => setScheduleRelay(relayWithLabel)}
+            delayLongPress={450}
             style={({ pressed }) => [
               styles.relayTile,
               relay.value ? styles.relayOn : styles.relayOff,
@@ -113,52 +140,106 @@ function RelayGrid({ relays, loading, updatingKey, names, onUpdate }) {
           </Pressable>
         );
       })}
+
+      <ScheduleModal
+        relay={scheduleRelay}
+        onClose={() => setScheduleRelay(null)}
+        onSave={(schedule) => {
+          onCreateSchedule(scheduleRelay, schedule);
+          setScheduleRelay(null);
+        }}
+      />
     </View>
   );
 }
 
-function SettingsList({ relays, names, onRenameRelay, onLogout }) {
+function SettingsList({
+  relays,
+  names,
+  schedules,
+  scheduleServiceNodes,
+  onRenameRelay,
+  onDeleteSchedule,
+  onLogout,
+}) {
   const [section, setSection] = useState('devices');
   const [draftNames, setDraftNames] = useState(names);
+
+  useEffect(() => {
+    setDraftNames(names);
+  }, [names]);
 
   return (
     <View style={styles.settings}>
       <View style={styles.settingsTabs}>
         <SettingsOption label="Devices" value="devices" active={section} onPress={setSection} />
+        <SettingsOption label="Schedules" value="schedules" active={section} onPress={setSection} />
         <SettingsOption label="About" value="about" active={section} onPress={setSection} />
         <SettingsOption label="Logout" value="logout" active={section} onPress={setSection} />
       </View>
 
-      {section === 'devices' && relays.length ? (
-        relays.map((relay) => (
-          <View key={relay.key} style={styles.settingCard}>
-            <Text style={styles.settingTitle}>{names[relay.key]?.trim() || relay.defaultName}</Text>
-            <TextInput
-              value={draftNames[relay.key] ?? names[relay.key] ?? relay.defaultName}
-              onChangeText={(text) =>
-                setDraftNames((current) => ({
-                  ...current,
-                  [relay.key]: text,
-                }))
-              }
-              placeholder="Relay name"
-              placeholderTextColor={colors.muted}
-              style={styles.nameInput}
-            />
-            <Pressable
-              onPress={() => onRenameRelay(relay.key, (draftNames[relay.key] ?? relay.defaultName).trim())}
-              style={({ pressed }) => [styles.saveButton, pressed ? styles.pressed : null]}
-            >
-              <Text style={styles.saveText}>Save name</Text>
-            </Pressable>
-          </View>
-        ))
-      ) : null}
+      {section === 'devices' && relays.length
+        ? relays.map((relay) => (
+            <View key={relay.key} style={styles.settingCard}>
+              <Text style={styles.settingTitle}>{names[relay.key]?.trim() || relay.defaultName}</Text>
+              <TextInput
+                value={draftNames[relay.key] ?? names[relay.key] ?? relay.defaultName}
+                onChangeText={(text) =>
+                  setDraftNames((current) => ({
+                    ...current,
+                    [relay.key]: text,
+                  }))
+                }
+                placeholder="Relay name"
+                placeholderTextColor={colors.muted}
+                style={styles.nameInput}
+              />
+              <Pressable
+                onPress={() => onRenameRelay(relay, (draftNames[relay.key] ?? relay.defaultName).trim())}
+                style={({ pressed }) => [styles.saveButton, pressed ? styles.pressed : null]}
+              >
+                <Text style={styles.saveText}>Save name</Text>
+              </Pressable>
+            </View>
+          ))
+        : null}
 
       {section === 'devices' && !relays.length ? (
         <View style={styles.empty}>
           <Text style={styles.emptyTitle}>No devices found</Text>
           <Text style={styles.emptyText}>Refresh after your RainMaker node reports relay parameters.</Text>
+        </View>
+      ) : null}
+
+      {section === 'schedules' && schedules.length
+        ? schedules.map((schedule) => (
+            <View key={schedule.key} style={styles.settingCard}>
+              <View style={styles.scheduleHeader}>
+                <View style={styles.scheduleTitleWrap}>
+                  <Text style={styles.settingTitle}>{schedule.name || schedule.id}</Text>
+                  <Text style={styles.scheduleMeta}>{schedule.nodeName}</Text>
+                </View>
+                <Pressable
+                  onPress={() => onDeleteSchedule(schedule)}
+                  style={({ pressed }) => [styles.deleteScheduleButton, pressed ? styles.pressed : null]}
+                >
+                  <Text style={styles.deleteScheduleText}>Delete</Text>
+                </Pressable>
+              </View>
+              <Text style={styles.scheduleMeta}>{formatScheduleTrigger(schedule.triggers?.[0])}</Text>
+              <Text style={styles.scheduleMeta}>{formatScheduleAction(schedule.action)}</Text>
+            </View>
+          ))
+        : null}
+
+      {section === 'schedules' && !schedules.length ? (
+        <View style={styles.empty}>
+          <Text style={styles.emptyTitle}>No schedules found</Text>
+          <Text style={styles.emptyText}>
+            {scheduleServiceNodes.length
+              ? 'Long press a device on Home to add a dated ON/OFF schedule.'
+              : 'This ESP node is not reporting the RainMaker Schedule service. Enable schedule and time service in firmware.'}
+          </Text>
         </View>
       ) : null}
 
@@ -169,9 +250,10 @@ function SettingsList({ relays, names, onRenameRelay, onLogout }) {
             <Text key={paragraph} style={styles.aboutText}>
               {paragraph}
             </Text>
-            
           ))}
-          <Text style={[styles.aboutTextFooter]}>~ Powered by <Text style={styles.rudradeb}>Rudradeb</Text> ❤️.</Text> 
+          <Text style={styles.aboutTextFooter}>
+            ~ Powered by <Text style={styles.rudradeb}>Rudradeb</Text>.
+          </Text>
         </View>
       ) : null}
 
@@ -199,6 +281,207 @@ function SettingsOption({ label, value, active, onPress }) {
   );
 }
 
+function ScheduleModal({ relay, onClose, onSave }) {
+  const today = new Date();
+  const [year, setYear] = useState(String(today.getFullYear()));
+  const [month, setMonth] = useState(String(today.getMonth() + 1).padStart(2, '0'));
+  const [day, setDay] = useState(String(today.getDate()).padStart(2, '0'));
+  const [hour, setHour] = useState('00');
+  const [minute, setMinute] = useState('00');
+  const [value, setValue] = useState(true);
+
+  useEffect(() => {
+    if (!relay) {
+      return;
+    }
+
+    const now = new Date();
+    setYear(String(now.getFullYear()));
+    setMonth(String(now.getMonth() + 1).padStart(2, '0'));
+    setDay(String(now.getDate()).padStart(2, '0'));
+    setHour(String(now.getHours()).padStart(2, '0'));
+    setMinute(String(now.getMinutes()).padStart(2, '0'));
+    setValue(!relay.value);
+  }, [relay]);
+
+  if (!relay) {
+    return null;
+  }
+
+  const parsedYear = Number(year);
+  const parsedMonth = Number(month);
+  const parsedDay = Number(day);
+  const parsedHour = Number(hour);
+  const parsedMinute = Number(minute);
+  const hasValidDateText = /^\d{4}$/.test(year) && /^\d{1,2}$/.test(month) && /^\d{1,2}$/.test(day);
+  const hasValidHourText = /^\d{1,2}$/.test(hour);
+  const hasValidMinuteText = /^\d{1,2}$/.test(minute);
+  const dateIsValid =
+    hasValidDateText &&
+    isValidDateParts(parsedYear, parsedMonth, parsedDay);
+  const timeIsValid =
+    hasValidHourText &&
+    hasValidMinuteText &&
+    Number.isInteger(parsedHour) &&
+    Number.isInteger(parsedMinute) &&
+    parsedHour >= 0 &&
+    parsedHour <= 23 &&
+    parsedMinute >= 0 &&
+    parsedMinute <= 59;
+  const formIsValid = dateIsValid && timeIsValid;
+
+  return (
+    <Modal transparent visible animationType="fade" onRequestClose={onClose}>
+      <View style={styles.modalOverlay}>
+        <View style={styles.modalCard}>
+          <Text numberOfLines={2} adjustsFontSizeToFit style={styles.modalTitle}>
+            {relay.displayName}
+          </Text>
+          <Text style={styles.modalText}>Set date and clock time</Text>
+
+          <View style={styles.dateRow}>
+            <TextInput
+              value={year}
+              onChangeText={setYear}
+              keyboardType="number-pad"
+              maxLength={4}
+              selectTextOnFocus
+              style={[styles.dateInput, styles.yearInput]}
+            />
+            <Text style={styles.dateSeparator}>-</Text>
+            <TextInput
+              value={month}
+              onChangeText={setMonth}
+              keyboardType="number-pad"
+              maxLength={2}
+              selectTextOnFocus
+              style={styles.dateInput}
+            />
+            <Text style={styles.dateSeparator}>-</Text>
+            <TextInput
+              value={day}
+              onChangeText={setDay}
+              keyboardType="number-pad"
+              maxLength={2}
+              selectTextOnFocus
+              style={styles.dateInput}
+            />
+          </View>
+
+          <View style={styles.timeRow}>
+            <TextInput
+              value={hour}
+              onChangeText={setHour}
+              keyboardType="number-pad"
+              maxLength={2}
+              selectTextOnFocus
+              style={styles.timeInput}
+            />
+            <Text style={styles.timeSeparator}>:</Text>
+            <TextInput
+              value={minute}
+              onChangeText={setMinute}
+              keyboardType="number-pad"
+              maxLength={2}
+              selectTextOnFocus
+              style={styles.timeInput}
+            />
+          </View>
+
+          <View style={styles.actionRow}>
+            <Pressable
+              onPress={() => setValue(true)}
+              style={[styles.actionButton, value ? styles.activeActionButton : null]}
+            >
+              <Text style={[styles.actionText, value ? styles.activeActionText : null]}>Turn ON</Text>
+            </Pressable>
+            <Pressable
+              onPress={() => setValue(false)}
+              style={[styles.actionButton, !value ? styles.activeActionButton : null]}
+            >
+              <Text style={[styles.actionText, !value ? styles.activeActionText : null]}>Turn OFF</Text>
+            </Pressable>
+          </View>
+
+          {!dateIsValid ? <Text style={styles.errorText}>Use a valid date as YYYY-MM-DD.</Text> : null}
+          {!timeIsValid ? <Text style={styles.errorText}>Use 24-hour time from 00:00 to 23:59.</Text> : null}
+
+          <View style={styles.modalActions}>
+            <Pressable onPress={onClose} style={styles.cancelButton}>
+              <Text style={styles.cancelText}>Cancel</Text>
+            </Pressable>
+            <Pressable
+              disabled={!formIsValid}
+              onPress={() =>
+                onSave({
+                  minutes: parsedHour * 60 + parsedMinute,
+                  day: parsedDay,
+                  month: parsedMonth,
+                  year: parsedYear,
+                  dateLabel: `${String(parsedYear)}-${String(parsedMonth).padStart(2, '0')}-${String(parsedDay).padStart(2, '0')}`,
+                  timeLabel: `${String(parsedHour).padStart(2, '0')}:${String(parsedMinute).padStart(2, '0')}`,
+                  value,
+                })
+              }
+              style={[styles.saveScheduleButton, !formIsValid ? styles.disabledButton : null]}
+            >
+              <Text style={styles.saveScheduleText}>Save</Text>
+            </Pressable>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  );
+}
+
+function isValidDateParts(year, month, day) {
+  if (!Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day)) {
+    return false;
+  }
+
+  if (year < 2024 || year > 2099 || month < 1 || month > 12 || day < 1 || day > 31) {
+    return false;
+  }
+
+  const date = new Date(year, month - 1, day);
+  return date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
+}
+
+function formatScheduleTrigger(trigger = {}) {
+  const time = formatMinutes(trigger.m);
+
+  if (trigger.dd && trigger.mm) {
+    return `${formatMonthBitmap(trigger.mm)} ${trigger.dd}, ${trigger.yy || 'every year'} at ${time}`;
+  }
+
+  return `At ${time}`;
+}
+
+function formatScheduleAction(action = {}) {
+  const [deviceName, params = {}] = Object.entries(action)[0] || [];
+  const [paramName, value] = Object.entries(params)[0] || [];
+
+  if (!deviceName || !paramName) {
+    return 'No action details';
+  }
+
+  return `${deviceName} ${paramName}: ${value ? 'ON' : 'OFF'}`;
+}
+
+function formatMinutes(minutes) {
+  if (!Number.isInteger(minutes)) {
+    return '--:--';
+  }
+
+  return `${String(Math.floor(minutes / 60)).padStart(2, '0')}:${String(minutes % 60).padStart(2, '0')}`;
+}
+
+function formatMonthBitmap(bitmap) {
+  const monthIndex = Math.max(0, Math.round(Math.log2(bitmap || 1)));
+  const monthNames = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return monthNames[monthIndex] || 'Date';
+}
+
 const styles = StyleSheet.create({
   keyboardView: {
     flex: 1,
@@ -210,8 +493,9 @@ const styles = StyleSheet.create({
     gap: spacing.md,
   },
   header: {
-    marginTop: spacing.sm,
-    marginBottom: spacing.sm,
+    paddingTop: spacing.sm,
+    paddingHorizontal: spacing.lg,
+    paddingBottom: spacing.sm,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
@@ -225,7 +509,7 @@ const styles = StyleSheet.create({
     fontWeight: '900',
   },
   settingsButton: {
-    minWidth: 54,
+    minWidth: 86,
     minHeight: 42,
     borderRadius: radius.md,
     alignItems: 'center',
@@ -302,7 +586,9 @@ const styles = StyleSheet.create({
   },
   settingsOptionText: {
     color: colors.muted,
+    fontSize: 11,
     fontWeight: '900',
+    textAlign: 'center',
   },
   activeSettingsOptionText: {
     color: colors.white,
@@ -340,6 +626,33 @@ const styles = StyleSheet.create({
   },
   saveText: {
     color: '#06130B',
+    fontWeight: '900',
+  },
+  scheduleHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: spacing.sm,
+  },
+  scheduleTitleWrap: {
+    flex: 1,
+  },
+  scheduleMeta: {
+    color: colors.muted,
+    fontSize: 13,
+    lineHeight: 18,
+    fontWeight: '700',
+  },
+  deleteScheduleButton: {
+    minHeight: 38,
+    minWidth: 78,
+    borderRadius: radius.sm,
+    backgroundColor: colors.red,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  deleteScheduleText: {
+    color: colors.white,
+    fontSize: 12,
     fontWeight: '900',
   },
   aboutText: {
@@ -389,5 +702,146 @@ const styles = StyleSheet.create({
     lineHeight: 21,
     marginTop: spacing.md,
     textAlign: 'center',
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(5, 9, 15, 0.78)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: spacing.lg,
+  },
+  modalCard: {
+    width: '100%',
+    maxWidth: 360,
+    borderRadius: radius.md,
+    backgroundColor: colors.surface,
+    borderWidth: 1,
+    borderColor: colors.line,
+    padding: spacing.lg,
+    gap: spacing.md,
+  },
+  modalTitle: {
+    color: colors.text,
+    fontSize: 20,
+    lineHeight: 25,
+    fontWeight: '900',
+    textAlign: 'center',
+  },
+  modalText: {
+    color: colors.muted,
+    fontSize: 13,
+    fontWeight: '800',
+    textAlign: 'center',
+  },
+  timeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.sm,
+  },
+  dateRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: spacing.xs,
+  },
+  dateInput: {
+    width: 58,
+    minHeight: 50,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: '#0B111C',
+    color: colors.text,
+    textAlign: 'center',
+    fontSize: 18,
+    fontWeight: '900',
+  },
+  yearInput: {
+    width: 86,
+  },
+  dateSeparator: {
+    color: colors.text,
+    fontSize: 18,
+    fontWeight: '900',
+  },
+  timeInput: {
+    width: 76,
+    minHeight: 56,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.line,
+    backgroundColor: '#0B111C',
+    color: colors.text,
+    textAlign: 'center',
+    fontSize: 24,
+    fontWeight: '900',
+  },
+  timeSeparator: {
+    color: colors.text,
+    fontSize: 24,
+    fontWeight: '900',
+  },
+  actionRow: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  actionButton: {
+    flex: 1,
+    minHeight: 44,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.line,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  activeActionButton: {
+    backgroundColor: colors.blue,
+    borderColor: colors.blue,
+  },
+  actionText: {
+    color: colors.muted,
+    fontWeight: '900',
+  },
+  activeActionText: {
+    color: colors.white,
+  },
+  errorText: {
+    color: colors.red,
+    fontSize: 12,
+    fontWeight: '800',
+    textAlign: 'center',
+  },
+  modalActions: {
+    flexDirection: 'row',
+    gap: spacing.sm,
+  },
+  cancelButton: {
+    flex: 1,
+    minHeight: 46,
+    borderRadius: radius.sm,
+    borderWidth: 1,
+    borderColor: colors.line,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  cancelText: {
+    color: colors.text,
+    fontWeight: '900',
+  },
+  saveScheduleButton: {
+    flex: 1,
+    minHeight: 46,
+    borderRadius: radius.sm,
+    backgroundColor: colors.green,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  saveScheduleText: {
+    color: '#06130B',
+    fontWeight: '900',
+  },
+  disabledButton: {
+    opacity: 0.45,
   },
 });

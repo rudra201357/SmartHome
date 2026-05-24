@@ -1,11 +1,21 @@
 import { useCallback, useEffect, useState } from 'react';
 import { Alert, SafeAreaView, StyleSheet } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
-import { fetchUserNodes, loginRainMaker, updateNodeParam } from './api/rainmakerApi';
+import {
+  createNodeSchedule,
+  deleteNodeSchedule,
+  fetchNodeParams,
+  fetchUserNodes,
+  loginRainMaker,
+  updateNodeMetadata,
+  updateNodeParam,
+} from './api/rainmakerApi';
 import DashboardScreen from './screens/DashboardScreen';
 import LoginScreen from './screens/LoginScreen';
 import { deleteStoredAccessToken, getStoredAccessToken, saveAccessToken } from './storage/authStorage';
 import { colors } from './styles/theme';
+
+const RELAY_NAMES_METADATA_KEY = 'smart_home_relay_names';
 
 export default function App() {
   const [accessToken, setAccessToken] = useState('');
@@ -27,6 +37,7 @@ export default function App() {
         }
         const nextNodes = await fetchUserNodes(token);
         setNodes(nextNodes);
+        setRelayNames(extractRelayNames(nextNodes));
       } catch (error) {
         if (options.clearSavedToken) {
           await deleteStoredAccessToken();
@@ -118,13 +129,94 @@ export default function App() {
     await deleteStoredAccessToken();
     setAccessToken('');
     setNodes([]);
+    setRelayNames({});
   }
 
-  function handleRenameRelay(key, name) {
-    setRelayNames((current) => ({
-      ...current,
-      [key]: name,
-    }));
+  async function handleRenameRelay(relay, name) {
+    const nextName = name.trim();
+
+    if (!nextName) {
+      Alert.alert('Rename device', 'Enter a device name first.');
+      return;
+    }
+
+    const nextNames = {
+      ...relayNames,
+      [relay.key]: nextName,
+    };
+    const currentMetadata = relay.node?.metadata || {};
+
+    try {
+      setRelayNames(nextNames);
+      await updateNodeMetadata(accessToken, relay.nodeId, {
+        ...currentMetadata,
+        [RELAY_NAMES_METADATA_KEY]: nextNames,
+      });
+      await loadNodes(accessToken, { silent: true });
+    } catch (error) {
+      setRelayNames(relayNames);
+      Alert.alert('Rename failed', error.message || 'Could not sync this name to RainMaker.');
+    }
+  }
+
+  async function handleCreateSchedule(relay, schedule) {
+    try {
+      const id = makeScheduleId();
+      const actionLabel = schedule.value ? 'ON' : 'OFF';
+      await createNodeSchedule(accessToken, relay.nodeId, {
+        id,
+        name: `${relay.displayName || relay.defaultName} ${actionLabel} ${schedule.dateLabel} ${schedule.timeLabel}`,
+        minutes: schedule.minutes,
+        day: schedule.day,
+        month: schedule.month,
+        year: schedule.year,
+        value: schedule.value,
+        deviceName: relay.deviceName,
+        paramName: relay.paramName,
+      });
+
+      await loadNodes(accessToken, { silent: true });
+      const params = await fetchNodeParams(accessToken, relay.nodeId);
+
+      if (!hasSchedule(params, id)) {
+        Alert.alert(
+          'Schedule not saved',
+          'RainMaker received the request, but the ESP node did not report the schedule back. Enable the RainMaker Schedule service and Time service in the firmware.',
+        );
+        return;
+      }
+
+      Alert.alert(
+        'Schedule added',
+        `${relay.displayName || relay.defaultName} will turn ${actionLabel} on ${schedule.dateLabel} at ${schedule.timeLabel}.`,
+      );
+    } catch (error) {
+      Alert.alert(
+        'Schedule failed',
+        error.message || 'Could not add the schedule. Make sure scheduling is enabled in the ESP RainMaker firmware.',
+      );
+    }
+  }
+
+  function handleDeleteSchedule(schedule) {
+    Alert.alert('Delete schedule', `Delete "${schedule.name || schedule.id}"?`, [
+      {
+        text: 'Cancel',
+        style: 'cancel',
+      },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          try {
+            await deleteNodeSchedule(accessToken, schedule.nodeId, schedule.id);
+            await loadNodes(accessToken, { silent: true });
+          } catch (error) {
+            Alert.alert('Delete failed', error.message || 'Could not delete this schedule.');
+          }
+        },
+      },
+    ]);
   }
 
   return (
@@ -139,6 +231,8 @@ export default function App() {
           updatingKey={updatingKey}
           relayNames={relayNames}
           onRenameRelay={handleRenameRelay}
+          onCreateSchedule={handleCreateSchedule}
+          onDeleteSchedule={handleDeleteSchedule}
         />
       ) : (
         <LoginScreen onLogin={handleLogin} loading={loading || checkingSavedLogin} />
@@ -154,3 +248,47 @@ const styles = StyleSheet.create({
     backgroundColor: colors.background,
   },
 });
+
+function extractRelayNames(nodes) {
+  return nodes.reduce((names, node) => {
+    const savedNames = node?.metadata?.[RELAY_NAMES_METADATA_KEY];
+
+    if (savedNames && typeof savedNames === 'object' && !Array.isArray(savedNames)) {
+      return {
+        ...names,
+        ...savedNames,
+      };
+    }
+
+    return names;
+  }, {});
+}
+
+function makeScheduleId() {
+  return Math.random().toString(16).slice(2, 6).toUpperCase();
+}
+
+function hasSchedule(params, scheduleId) {
+  const schedules = normalizeScheduleList(params?.Schedule?.Schedules);
+  return schedules.some((schedule) => schedule?.id === scheduleId);
+}
+
+function normalizeScheduleList(schedules) {
+  if (Array.isArray(schedules)) {
+    return schedules;
+  }
+
+  if (typeof schedules === 'string') {
+    try {
+      return normalizeScheduleList(JSON.parse(schedules));
+    } catch (error) {
+      return [];
+    }
+  }
+
+  if (schedules && typeof schedules === 'object') {
+    return normalizeScheduleList(schedules.value);
+  }
+
+  return [];
+}
