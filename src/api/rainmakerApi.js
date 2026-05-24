@@ -62,7 +62,43 @@ export async function fetchUserNodes(accessToken) {
     startId = data.next_id || '';
   } while (startId);
 
-  return nodes;
+  return Promise.all(
+    nodes.map(async (node) => {
+      const nodeId = getNodeId(node);
+
+      if (!nodeId) {
+        return node;
+      }
+
+      try {
+        const params = await fetchNodeParams(accessToken, nodeId);
+
+        return {
+          ...node,
+          params: {
+            ...(node.params || {}),
+            ...(params || {}),
+          },
+        };
+      } catch (error) {
+        return node;
+      }
+    }),
+  );
+}
+
+export async function fetchNodeParams(accessToken, nodeId) {
+  const response = await fetch(
+    `${BASE_URL}/v1/user/nodes/params?node_id=${encodeURIComponent(nodeId)}`,
+    {
+      headers: {
+        Authorization: accessToken,
+      },
+    },
+  );
+
+  const data = await parseResponse(response);
+  return data.params || data;
 }
 
 export async function updateNodeParam(accessToken, nodeId, deviceName, paramName, value) {
@@ -83,6 +119,89 @@ export async function updateNodeParam(accessToken, nodeId, deviceName, paramName
       body: JSON.stringify(payload),
     },
   );
+
+  return parseResponse(response);
+}
+
+export async function createNodeSchedule(accessToken, nodeId, schedule) {
+  const payload = {
+    Schedule: {
+      Schedules: [
+        {
+          name: schedule.name,
+          id: schedule.id,
+          operation: 'add',
+          triggers: [
+            {
+              m: schedule.minutes,
+              dd: schedule.day,
+              mm: 1 << (schedule.month - 1),
+              yy: schedule.year,
+            },
+          ],
+          action: {
+            [schedule.deviceName]: {
+              [schedule.paramName]: schedule.value,
+            },
+          },
+        },
+      ],
+    },
+  };
+
+  const response = await fetch(
+    `${BASE_URL}/v1/user/nodes/params?node_id=${encodeURIComponent(nodeId)}`,
+    {
+      method: 'PUT',
+      headers: {
+        Authorization: accessToken,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    },
+  );
+
+  return parseResponse(response);
+}
+
+export async function deleteNodeSchedule(accessToken, nodeId, scheduleId) {
+  const payload = {
+    Schedule: {
+      Schedules: [
+        {
+          id: scheduleId,
+          operation: 'remove',
+        },
+      ],
+    },
+  };
+
+  const response = await fetch(
+    `${BASE_URL}/v1/user/nodes/params?node_id=${encodeURIComponent(nodeId)}`,
+    {
+      method: 'PUT',
+      headers: {
+        Authorization: accessToken,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+    },
+  );
+
+  return parseResponse(response);
+}
+
+export async function updateNodeMetadata(accessToken, nodeId, metadata) {
+  const response = await fetch(`${BASE_URL}/v1/user/nodes?node_id=${encodeURIComponent(nodeId)}`, {
+    method: 'PUT',
+    headers: {
+      Authorization: accessToken,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      metadata,
+    }),
+  });
 
   return parseResponse(response);
 }
