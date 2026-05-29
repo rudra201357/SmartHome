@@ -23,6 +23,7 @@ export default function LoginScreen({ onLogin, loading }) {
     >
       <View style={styles.hero}>
         <Text style={styles.title}>My SmartHome</Text>
+        <Text style={{ color: colors.muted, marginTop: spacing.sm }}> Enter your Rainmaker credentials</Text>
       </View>
 
       <View style={styles.card}>
@@ -32,7 +33,7 @@ export default function LoginScreen({ onLogin, loading }) {
           autoCapitalize="none"
           autoCorrect={false}
           keyboardType="email-address"
-          placeholder="Email"
+          placeholder="Email or Mobile"
           placeholderTextColor={colors.muted}
           style={styles.input}
         />

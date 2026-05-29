@@ -2,20 +2,18 @@ import { useCallback, useEffect, useState } from 'react';
 import { Alert, SafeAreaView, StyleSheet } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import {
-  createNodeSchedule,
-  deleteNodeSchedule,
-  fetchNodeParams,
+  createNodeAutomation,
+  deleteNodeAutomation,
+  fetchUserAutomations,
   fetchUserNodes,
   loginRainMaker,
-  updateNodeMetadata,
   updateNodeParam,
 } from './api/rainmakerApi';
 import DashboardScreen from './screens/DashboardScreen';
 import LoginScreen from './screens/LoginScreen';
 import { deleteStoredAccessToken, getStoredAccessToken, saveAccessToken } from './storage/authStorage';
 import { colors } from './styles/theme';
-
-const RELAY_NAMES_METADATA_KEY = 'smart_home_relay_names';
+import { getAutomationId, getAutomationName } from './utils/automationHelpers';
 
 export default function App() {
   const [accessToken, setAccessToken] = useState('');
@@ -23,7 +21,7 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [checkingSavedLogin, setCheckingSavedLogin] = useState(true);
   const [updatingKey, setUpdatingKey] = useState('');
-  const [relayNames, setRelayNames] = useState({});
+  const [automations, setAutomations] = useState([]);
 
   const loadNodes = useCallback(
     async (token, options = {}) => {
@@ -37,12 +35,21 @@ export default function App() {
         }
         const nextNodes = await fetchUserNodes(token);
         setNodes(nextNodes);
-        setRelayNames(extractRelayNames(nextNodes));
+
+        if (!options.silent) {
+          try {
+            const nextAutomations = await fetchUserAutomations(token, getNodeIds(nextNodes));
+            setAutomations(nextAutomations);
+          } catch (error) {
+            setAutomations([]);
+          }
+        }
       } catch (error) {
         if (options.clearSavedToken) {
           await deleteStoredAccessToken();
           setAccessToken('');
           setNodes([]);
+          setAutomations([]);
         }
         if (!options.silent) {
           Alert.alert('RainMaker', error.message || 'Unable to load nodes.');
@@ -53,6 +60,19 @@ export default function App() {
     },
     [],
   );
+
+  const refreshAutomations = useCallback(async () => {
+    if (!accessToken) {
+      return;
+    }
+
+    try {
+      const nextAutomations = await fetchUserAutomations(accessToken, getNodeIds(nodes));
+      setAutomations(nextAutomations);
+    } catch (error) {
+      setAutomations([]);
+    }
+  }, [accessToken, nodes]);
 
   useEffect(() => {
     let isMounted = true;
@@ -75,6 +95,8 @@ export default function App() {
     }
 
     restoreLogin();
+
+
 
     return () => {
       isMounted = false;
@@ -129,77 +151,31 @@ export default function App() {
     await deleteStoredAccessToken();
     setAccessToken('');
     setNodes([]);
-    setRelayNames({});
+    setAutomations([]);
   }
 
-  async function handleRenameRelay(relay, name) {
-    const nextName = name.trim();
 
-    if (!nextName) {
-      Alert.alert('Rename device', 'Enter a device name first.');
+
+  async function handleCreateAutomation(automation) {
+    try {
+      await createNodeAutomation(accessToken, automation);
+      const nextAutomations = await fetchUserAutomations(accessToken, getNodeIds(nodes));
+      setAutomations(nextAutomations);
+      Alert.alert('Automation added', `${automation.name} is now active in RainMaker.`);
+    } catch (error) {
+      Alert.alert('Automation failed', error.message || 'Could not add this automation.');
+    }
+  }
+
+  function handleDeleteAutomation(automation) {
+    const automationId = getAutomationId(automation);
+
+    if (!automationId) {
+      Alert.alert('Automation', 'This automation does not include an ID from RainMaker.');
       return;
     }
 
-    const nextNames = {
-      ...relayNames,
-      [relay.key]: nextName,
-    };
-    const currentMetadata = relay.node?.metadata || {};
-
-    try {
-      setRelayNames(nextNames);
-      await updateNodeMetadata(accessToken, relay.nodeId, {
-        ...currentMetadata,
-        [RELAY_NAMES_METADATA_KEY]: nextNames,
-      });
-      await loadNodes(accessToken, { silent: true });
-    } catch (error) {
-      setRelayNames(relayNames);
-      Alert.alert('Rename failed', error.message || 'Could not sync this name to RainMaker.');
-    }
-  }
-
-  async function handleCreateSchedule(relay, schedule) {
-    try {
-      const id = makeScheduleId();
-      const actionLabel = schedule.value ? 'ON' : 'OFF';
-      await createNodeSchedule(accessToken, relay.nodeId, {
-        id,
-        name: `${relay.displayName || relay.defaultName} ${actionLabel} ${schedule.dateLabel} ${schedule.timeLabel}`,
-        minutes: schedule.minutes,
-        day: schedule.day,
-        month: schedule.month,
-        year: schedule.year,
-        value: schedule.value,
-        deviceName: relay.deviceName,
-        paramName: relay.paramName,
-      });
-
-      await loadNodes(accessToken, { silent: true });
-      const params = await fetchNodeParams(accessToken, relay.nodeId);
-
-      if (!hasSchedule(params, id)) {
-        Alert.alert(
-          'Schedule not saved',
-          'RainMaker received the request, but the ESP node did not report the schedule back. Enable the RainMaker Schedule service and Time service in the firmware.',
-        );
-        return;
-      }
-
-      Alert.alert(
-        'Schedule added',
-        `${relay.displayName || relay.defaultName} will turn ${actionLabel} on ${schedule.dateLabel} at ${schedule.timeLabel}.`,
-      );
-    } catch (error) {
-      Alert.alert(
-        'Schedule failed',
-        error.message || 'Could not add the schedule. Make sure scheduling is enabled in the ESP RainMaker firmware.',
-      );
-    }
-  }
-
-  function handleDeleteSchedule(schedule) {
-    Alert.alert('Delete schedule', `Delete "${schedule.name || schedule.id}"?`, [
+    Alert.alert('Delete automation', `Delete "${getAutomationName(automation) || automationId}"?`, [
       {
         text: 'Cancel',
         style: 'cancel',
@@ -209,15 +185,18 @@ export default function App() {
         style: 'destructive',
         onPress: async () => {
           try {
-            await deleteNodeSchedule(accessToken, schedule.nodeId, schedule.id);
-            await loadNodes(accessToken, { silent: true });
+            await deleteNodeAutomation(accessToken, automationId);
+            const nextAutomations = await fetchUserAutomations(accessToken, getNodeIds(nodes));
+            setAutomations(nextAutomations);
           } catch (error) {
-            Alert.alert('Delete failed', error.message || 'Could not delete this schedule.');
+            Alert.alert('Delete failed', error.message || 'Could not delete this automation.');
           }
         },
       },
     ]);
   }
+
+
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -229,10 +208,10 @@ export default function App() {
           onLogout={handleLogout}
           onUpdate={handleUpdate}
           updatingKey={updatingKey}
-          relayNames={relayNames}
-          onRenameRelay={handleRenameRelay}
-          onCreateSchedule={handleCreateSchedule}
-          onDeleteSchedule={handleDeleteSchedule}
+          automations={automations}
+          onCreateAutomation={handleCreateAutomation}
+          onDeleteAutomation={handleDeleteAutomation}
+          onRefreshAutomations={refreshAutomations}
         />
       ) : (
         <LoginScreen onLogin={handleLogin} loading={loading || checkingSavedLogin} />
@@ -249,46 +228,8 @@ const styles = StyleSheet.create({
   },
 });
 
-function extractRelayNames(nodes) {
-  return nodes.reduce((names, node) => {
-    const savedNames = node?.metadata?.[RELAY_NAMES_METADATA_KEY];
 
-    if (savedNames && typeof savedNames === 'object' && !Array.isArray(savedNames)) {
-      return {
-        ...names,
-        ...savedNames,
-      };
-    }
 
-    return names;
-  }, {});
-}
-
-function makeScheduleId() {
-  return Math.random().toString(16).slice(2, 6).toUpperCase();
-}
-
-function hasSchedule(params, scheduleId) {
-  const schedules = normalizeScheduleList(params?.Schedule?.Schedules);
-  return schedules.some((schedule) => schedule?.id === scheduleId);
-}
-
-function normalizeScheduleList(schedules) {
-  if (Array.isArray(schedules)) {
-    return schedules;
-  }
-
-  if (typeof schedules === 'string') {
-    try {
-      return normalizeScheduleList(JSON.parse(schedules));
-    } catch (error) {
-      return [];
-    }
-  }
-
-  if (schedules && typeof schedules === 'object') {
-    return normalizeScheduleList(schedules.value);
-  }
-
-  return [];
+function getNodeIds(nodes) {
+  return nodes.map((node) => node?.id || node?.node_id || node?.config?.node_id || '').filter(Boolean);
 }
